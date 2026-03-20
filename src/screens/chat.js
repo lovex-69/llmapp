@@ -1,4 +1,5 @@
-import { state, getActiveChat, getActiveBehavior, getActiveModel } from '../state.js';
+import { CreateMLCEngine } from '@mlc-ai/web-llm';
+import { state, getActiveChat, getActiveBehavior, getActiveModel, aiEngine, setAiEngine } from '../state.js';
 import { showToast } from '../components/toast.js';
 
 // Markdown parser
@@ -32,29 +33,7 @@ const slashCommands = [
   { cmd: '/brainstorm', label: 'Brainstorm', desc: 'Generate ideas around a topic', prompt: 'Please brainstorm ideas for:\n' },
 ];
 
-// Simulated responses
-const aiResponses = {
-  default: [
-    "Good question. Let me break it down.\n\n* **First**, consider the core requirements\n* **Second**, evaluate the constraints\n* **Third**, implement iteratively\n\nWant me to go deeper on any of these?",
-    "Here's what I'd focus on:\n\n**Key points:**\n\n1. Break complex problems into manageable pieces\n2. Test and verify each piece independently\n3. Integrate at well-defined boundaries\n\nThis pattern shows up everywhere in **software engineering** and **systems design**.",
-  ],
-  code: [
-    "Here's one approach:\n\n```python\ndef solve(data):\n    result = []\n    for item in data:\n        if item.meets_criteria():\n            result.append(item.process())\n    return result\n```\n\n**O(n)** time complexity. Handles edge cases cleanly.\n\nShould I add error handling?",
-    "```javascript\nconst process = (input) => {\n  return input\n    .filter(Boolean)\n    .map(transform)\n    .reduce(aggregate, initial);\n};\n```\n\n**Why this works:**\n* Functional pipeline keeps it readable\n* `filter(Boolean)` strips falsy values\n* Reducer accumulates final state",
-  ],
-  short: [
-    "Short answer: **modular design**. Test each piece independently, then integrate. Keeps complexity manageable and debugging straightforward.",
-    "Yes — but handle the edge case where inputs are empty. A guard clause at the top solves that cleanly.",
-  ],
-  detailed: [
-    "Let me walk through this properly.\n\n## Overview\n\nThis involves several connected concepts worth understanding individually first.\n\n## Step 1: Foundation\n\nThe core idea is **separation of concerns**. One module, one responsibility.\n\n## Step 2: Implementation\n\nStart with the data layer:\n\n```python\nclass DataProcessor:\n    def __init__(self, config):\n        self.config = config\n        self.cache = {}\n    \n    def process(self, raw_data):\n        validated = self.validate(raw_data)\n        transformed = self.transform(validated)\n        return self.output(transformed)\n```\n\n## Step 3: Integration\n\nConnect modules through clean interfaces. Dependency injection keeps things testable.\n\n## Takeaway\n\nThis layered approach gives you:\n* **Maintainability** — update individual parts without breaking the rest\n* **Testability** — isolate and verify each piece\n* **Scalability** — add features without major refactoring",
-  ],
-};
-
-function getAiResponse(style = 'default') {
-  const pool = aiResponses[style] || aiResponses.default;
-  return pool[Math.floor(Math.random() * pool.length)];
-}
+// Actual inference via WebLLM
 
 // Render messages
 function renderMessages(chat) {
@@ -168,21 +147,7 @@ export function renderChat() {
   </div>`;
 }
 
-// Streaming text
-function streamText(element, text, callback) {
-  let i = 0;
-  const words = text.split(' ');
-  let current = '';
-  function addWord() {
-    if (i < words.length) {
-      current += (i > 0 ? ' ' : '') + words[i];
-      element.innerHTML = parseMd(current);
-      i++;
-      setTimeout(addWord, 25 + Math.random() * 35);
-    } else if (callback) callback();
-  }
-  addWord();
-}
+// Streaming text handled implicitly via WebLLM
 
 // Init
 export function initChat() {
@@ -192,10 +157,11 @@ export function initChat() {
   const slashMenu = document.getElementById('slash-menu');
   let responseStyle = 'default';
 
-  function sendMessage(overrideText) {
+  async function sendMessage(overrideText) {
     const text = (overrideText || input.value).trim();
     if (!text) return;
     const chat = getActiveChat();
+    // User message
     chat.messages.push({ role: 'user', text });
     if (!overrideText) { input.value = ''; input.style.height = 'auto'; }
     slashMenu.classList.add('hidden');
@@ -205,29 +171,88 @@ export function initChat() {
 
     const typingDiv = document.createElement('div');
     typingDiv.className = 'msg msg-ai';
-    typingDiv.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble"><div class="typing-indicator" style="align-items:center;gap:8px;font-size:0.8rem;color:var(--text-secondary);font-weight:500"><div style="display:flex;gap:4px"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div><span class="loading-text">Analyzing context...</span></div></div></div></div>`;
+    typingDiv.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble"><div class="typing-indicator" style="align-items:center;gap:8px;font-size:0.8rem;color:var(--text-secondary);font-weight:500"><div style="display:flex;gap:4px"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div><span class="loading-text" id="model-status-text">Starting inference engine...</span></div></div></div></div>`;
     messagesEl.appendChild(typingDiv);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 
-    let style = responseStyle;
-    if (text.toLowerCase().startsWith('/code') || text.toLowerCase().includes('code') || text.toLowerCase().includes('function')) style = 'code';
-    if (text.toLowerCase().startsWith('/explain')) style = 'detailed';
-    if (text.toLowerCase().startsWith('/summarize') || text.toLowerCase().startsWith('/simplify')) style = 'short';
-
-    setTimeout(() => {
+    const modelInfo = getActiveModel();
+    if (!modelInfo || !modelInfo.webllmId) {
       typingDiv.remove();
-      const model = getActiveModel();
-      let aiText = '';
-      if (!model) {
-        aiText = "It looks like you don't have an active AI model selected. Head over to the **Models** tab or the **Store** to download one, and we can get started!";
-      } else {
-        aiText = getAiResponse(style);
-      }
       const aiMsg = document.createElement('div');
       aiMsg.className = 'msg msg-ai';
-      const tokCount = Math.floor(aiText.length / 4);
-      const speed = (15 + Math.random() * 10).toFixed(1);
-      aiMsg.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble"></div>
+      aiMsg.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble"><p>It looks like this model is not fully supported for on-device inference yet. Please select another model from the Store.</p></div></div>`;
+      messagesEl.appendChild(aiMsg);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      chat.messages.push({ role: 'ai', text: "It looks like this model is not fully supported for on-device inference yet. Please select another model from the Store." });
+      return;
+    }
+
+    try {
+      const statusIndicator = document.getElementById('model-status-text');
+      
+      let currentEngine = aiEngine;
+      if (!currentEngine || state.currentEngineModel !== modelInfo.webllmId) {
+        if (statusIndicator) statusIndicator.textContent = 'Downloading weights (first time only)...';
+        
+        const initProgressCallback = (report) => {
+          if (document.getElementById('model-status-text')) {
+            document.getElementById('model-status-text').textContent = report.text;
+          }
+        };
+        
+        // This initializes WebLLM
+        currentEngine = await CreateMLCEngine(modelInfo.webllmId, { initProgressCallback });
+        setAiEngine(currentEngine);
+        state.currentEngineModel = modelInfo.webllmId;
+      }
+      
+      if (document.getElementById('model-status-text')) {
+        document.getElementById('model-status-text').textContent = 'Generating...';
+      }
+
+      // Format history
+      const behavior = getActiveBehavior();
+      const sysPrompt = behavior ? behavior.prompt : 'You are a helpful AI assistant running purely on-device.';
+      const msgParams = [{ role: 'system', content: sysPrompt }];
+      
+      // Pass the previous chat history down for real contextual generations
+      for (let m of chat.messages) {
+        if (m.text) {
+          msgParams.push({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.text });
+        }
+      }
+
+      const chunks = await currentEngine.chat.completions.create({
+        messages: msgParams,
+        stream: true,
+      });
+
+      typingDiv.remove();
+      
+      const aiMsg = document.createElement('div');
+      aiMsg.className = 'msg msg-ai';
+      aiMsg.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble" id="streaming-bubble"></div></div>`;
+      messagesEl.appendChild(aiMsg);
+      
+      const bubble = aiMsg.querySelector('#streaming-bubble');
+      let aiText = '';
+      const startTime = performance.now();
+      
+      for await (const chunk of chunks) {
+        const token = chunk.choices[0]?.delta?.content || "";
+        aiText += token;
+        bubble.innerHTML = parseMd(aiText);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+      
+      const endTime = performance.now();
+      const seconds = (endTime - startTime) / 1000;
+      
+      const tokCount = Math.floor(aiText.length / 4); // Roughly 4 chars per token
+      const speed = (tokCount / seconds).toFixed(1);
+
+      // Re-render message block with final actions UI
+      aiMsg.innerHTML = `<div class="msg-avatar">N</div><div class="msg-content"><div class="msg-bubble">${parseMd(aiText)}</div>
         <div class="msg-actions">
           <button class="msg-action-btn copy-msg" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>
           <button class="msg-action-btn export-msg" title="Export as Note"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export</button>
@@ -240,23 +265,22 @@ export function initChat() {
           <button class="msg-action-btn toggle-transparency" title="Info"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></button>
         </div>
         <div class="transparency-panel hidden">
-          <div class="tp-row"><span class="tp-label">Model</span><span class="tp-value">${model?.name||'Unknown'}</span></div>
+          <div class="tp-row"><span class="tp-label">Model</span><span class="tp-value">${modelInfo.name}</span></div>
           <div class="tp-row"><span class="tp-label">Tokens</span><span class="tp-value">${tokCount}</span></div>
           <div class="tp-row"><span class="tp-label">Speed</span><span class="tp-value">${speed} tok/s</span></div>
           <div class="tp-row"><span class="tp-label">Processing</span><span class="tp-value tp-local">On-device</span></div>
         </div>
       </div>`;
-      messagesEl.appendChild(aiMsg);
+      
+      chat.messages.push({ role: 'ai', text: aiText });
       messagesEl.scrollTop = messagesEl.scrollHeight;
-      streamText(aiMsg.querySelector('.msg-bubble'), aiText, () => {
-        chat.messages.push({ role: 'ai', text: aiText });
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-        bindMsgActions();
-        showSuggestionBar();
-      });
-    }, 800 + Math.random() * 800);
-
-    responseStyle = 'default';
+      bindMsgActions();
+      showSuggestionBar();
+    } catch (err) {
+      console.error(err);
+      if(typingDiv) typingDiv.remove();
+      showToast('Error generating response: ' + err.message, 'error');
+    }
   }
 
   sendBtn.addEventListener('click', () => sendMessage());
